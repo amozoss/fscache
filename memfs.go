@@ -7,7 +7,7 @@ import (
 	"sync"
 	"time"
 
-	"gopkg.in/djherbis/stream.v1"
+	"github.com/amozoss/stream"
 )
 
 type memFS struct {
@@ -23,7 +23,7 @@ func NewMemFs() FileSystem {
 	}
 }
 
-func (fs *memFS) Reload(add func(key, name string)) error {
+func (fs *memFS) Reload(add func(key string)) error {
 	return nil
 }
 

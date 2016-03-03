@@ -2,7 +2,6 @@ package fscache
 
 import (
 	"bytes"
-	"crypto/md5"
 	"fmt"
 	"io"
 	"io/ioutil"
@@ -19,7 +18,8 @@ func createFile(name string) (*os.File, error) {
 }
 
 func init() {
-	c, _ := NewCache(NewMemFs(), nil)
+	// FIXME
+	c, _ := NewCache(NewMemFs(),"./", nil)
 	go ListenAndServe(c, ":10000")
 }
 
@@ -31,14 +31,14 @@ func testCaches(t *testing.T, run func(c Cache)) {
 	}
 	run(c)
 
-	c, err = NewCache(NewMemFs(), NewReaper(time.Hour, time.Hour))
+	c, err = NewCache(NewMemFs(), "./cache",  NewReaper(time.Hour, time.Hour))
 	if err != nil {
 		t.Error(err.Error())
 		return
 	}
 	run(c)
 
-	c2, _ := NewCache(NewMemFs(), nil)
+	c2, _ := NewCache(NewMemFs(), "./cache", nil)
 	run(NewPartition(NewDistributor(c, c2)))
 
 	lc := NewLayered(c, c2)
@@ -73,7 +73,7 @@ func TestHandler(t *testing.T) {
 
 func TestMemFs(t *testing.T) {
 	fs := NewMemFs()
-	fs.Reload(func(key, name string) {}) // nop
+	fs.Reload(func(key string) {}) // nop
 	if _, err := fs.Open("test"); err == nil {
 		t.Errorf("stream shouldn't exist")
 	}
@@ -100,13 +100,15 @@ func TestMemFs(t *testing.T) {
 
 func TestLoadCleanup1(t *testing.T) {
 	os.Mkdir("./cache6", 0700)
-	f, err := createFile(filepath.Join("./cache6", "s11111111"+tob64("test")))
+	name := "test"
+	key := fileName(name)
+	f, err := createFile(filepath.Join("./cache6", key))
 	if err != nil {
 		t.Error(err.Error())
 	}
 	f.Close()
 	<-time.After(time.Second)
-	f, err = createFile(filepath.Join("./cache6", "s22222222"+tob64("test")))
+	f, err = createFile(filepath.Join("./cache6", key))
 	if err != nil {
 		t.Error(err.Error())
 	}
@@ -119,7 +121,7 @@ func TestLoadCleanup1(t *testing.T) {
 	}
 	defer c.Clean()
 
-	if !c.Exists("test") {
+	if !c.Exists(name) {
 		t.Errorf("expected test to exist")
 	}
 }
@@ -138,33 +140,22 @@ const longString = `
 `
 
 func TestLoadCleanup2(t *testing.T) {
-	hash := md5.Sum([]byte(longString))
-	name2 := fmt.Sprintf("%s%s%x", longPrefix, "22222222", hash[:])
-	name1 := fmt.Sprintf("%s%s%x", longPrefix, "11111111", hash[:])
+	name2 := fmt.Sprintf("%s%s%s", 'l', "22222222", longString)
+	name1 := fmt.Sprintf("%s%s%s", 'l', "11111111", longString)
 
 	os.Mkdir("./cache7", 0700)
-	f, err := createFile(filepath.Join("./cache7", name2))
+	f, err := createFile(filepath.Join("./cache7", fileName(name2)))
 	if err != nil {
 		t.Error(err.Error())
 	}
-	f.Close()
-	f, err = createFile(filepath.Join("./cache7", fmt.Sprintf("%s.key", name2)))
-	if err != nil {
-		t.Error(err.Error())
-	}
-	f.Write([]byte(longString))
+	f.Write([]byte("Some file content that is cached"))
 	f.Close()
 	<-time.After(time.Second)
-	f, err = createFile(filepath.Join("./cache7", name1))
+	f, err = createFile(filepath.Join("./cache7", fileName(name1)))
 	if err != nil {
 		t.Error(err.Error())
 	}
-	f.Close()
-	f, err = createFile(filepath.Join("./cache7", fmt.Sprintf("%s.key", name1)))
-	if err != nil {
-		t.Error(err.Error())
-	}
-	f.Write([]byte(longString))
+	f.Write([]byte("Some file content that is cached"))
 	f.Close()
 
 	c, err := New("./cache7", 0700, 0)
@@ -174,7 +165,7 @@ func TestLoadCleanup2(t *testing.T) {
 	}
 	defer c.Clean()
 
-	if !c.Exists(longString) {
+	if !c.Exists(name1) {
 		t.Errorf("expected test to exist")
 	}
 }
@@ -191,7 +182,8 @@ func TestReload(t *testing.T) {
 		return
 	}
 	r.Close()
-	w.Write([]byte("hello world\n"))
+	text := "hello world"
+	w.Write([]byte(text))
 	w.Close()
 
 	nc, err := New("./cache5", 0700, 0)
@@ -199,6 +191,16 @@ func TestReload(t *testing.T) {
 		t.Error(err.Error())
 		return
 	}
+	r, w, err = nc.Get("stream")
+	if w != nil {
+		t.Errorf("expected writer to be nil")
+	}
+	p, err := ioutil.ReadAll(r)
+	if !bytes.Equal(p, []byte(text)) {
+		t.Errorf("expected %s, got %s", text, string(p))
+	}
+	r.Close()
+
 	defer nc.Clean()
 
 	if !nc.Exists("stream") {
@@ -218,7 +220,7 @@ func TestReaper(t *testing.T) {
 		t.FailNow()
 	}
 
-	c, err := NewCache(fs, NewReaper(0*time.Second, 100*time.Millisecond))
+	c, err := NewCache(fs, "./cache1", NewReaper(0*time.Second, 100*time.Millisecond))
 
 	if err != nil {
 		t.Error(err.Error())

@@ -1,13 +1,16 @@
 package fscache
 
 import (
+	"crypto/md5"
+	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"time"
 
-	"gopkg.in/djherbis/stream.v1"
+	"github.com/amozoss/stream"
 )
 
 // Cache works like a concurrent-safe map for streams.
@@ -18,16 +21,16 @@ type Cache interface {
 	// If the key does exist, w == nil.
 	// r will always be non-nil as long as err == nil and you must close r when you're done reading.
 	// Get can be called concurrently, and writing and reading is concurrent safe.
-	Get(key string) (ReaderAtCloser, io.WriteCloser, error)
+	Get(name string) (ReaderAtCloser, io.WriteCloser, error)
 
 	// Remove deletes the stream from the cache, blocking until the underlying
 	// file can be deleted (all active streams finish with it).
 	// It is safe to call Remove concurrently with Get.
-	Remove(key string) error
+	Remove(name string) error
 
 	// Exists checks if a key is in the cache.
 	// It is safe to call Exists concurrently with Get.
-	Exists(key string) bool
+	Exists(name string) bool
 
 	// Clean will empty the cache and delete the cache folder.
 	// Clean is not safe to call while streams are being read/written.
@@ -39,6 +42,7 @@ type cache struct {
 	files map[string]*cachedFile
 	grim  Reaper
 	fs    FileSystem
+	dir   string
 }
 
 type ReaderAtCloser interface {
@@ -61,17 +65,18 @@ func New(dir string, perms os.FileMode, expiry time.Duration) (Cache, error) {
 			period: expiry,
 		}
 	}
-	return NewCache(fs, grim)
+	return NewCache(fs, dir, grim)
 }
 
 // NewCache creates a new Cache based on FileSystem fs.
 // fs.Files() are loaded using the name they were created with as a key.
 // Reaper is used to determine when files expire, nil means never expire.
-func NewCache(fs FileSystem, grim Reaper) (Cache, error) {
+func NewCache(fs FileSystem, dir string, grim Reaper) (Cache, error) {
 	c := &cache{
 		files: make(map[string]*cachedFile),
 		grim:  grim,
 		fs:    fs,
+		dir:   dir,
 	}
 	err := c.load()
 	if err != nil {
@@ -113,21 +118,38 @@ func (c *cache) haunt() {
 func (c *cache) load() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.fs.Reload(func(key, name string) {
-		c.files[key] = c.oldFile(name)
+	return c.fs.Reload(func(key string) {
+		// keys will be names of the files
+		c.files[key] = c.oldFile(key)
 	})
 }
 
-func (c *cache) Exists(key string) bool {
+func (c *cache) Exists(name string) bool {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	_, ok := c.files[key]
+	_, ok := c.getFile(name)
 	return ok
 }
 
-func (c *cache) Get(key string) (r ReaderAtCloser, w io.WriteCloser, err error) {
-	c.mu.RLock()
+func fileName(name string) string {
+	md5sum := md5.Sum([]byte(name))
+	return fmt.Sprintf("%x", md5sum[:])
+}
+
+func (c *cache) putFile(name string, file *cachedFile) {
+	key := fileName(name)
+	c.files[key] = file
+}
+
+func (c *cache) getFile(name string) (*cachedFile, bool) {
+	key := fileName(name)
 	f, ok := c.files[key]
+	return f, ok
+}
+
+func (c *cache) Get(name string) (r ReaderAtCloser, w io.WriteCloser, err error) {
+	c.mu.RLock()
+	f, ok := c.getFile(name)
 	if ok {
 		r, err = f.next()
 		c.mu.RUnlock()
@@ -138,13 +160,13 @@ func (c *cache) Get(key string) (r ReaderAtCloser, w io.WriteCloser, err error) 
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	f, ok = c.files[key]
+	f, ok = c.getFile(name)
 	if ok {
 		r, err = f.next()
 		return r, nil, err
 	}
 
-	f, err = c.newFile(key)
+	f, err = c.newFile(name)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -156,15 +178,18 @@ func (c *cache) Get(key string) (r ReaderAtCloser, w io.WriteCloser, err error) 
 		return nil, nil, err
 	}
 
-	c.files[key] = f
+	c.putFile(name, f)
 
 	return r, f, err
 }
 
-func (c *cache) Remove(key string) error {
+func (c *cache) Remove(name string) error {
 	c.mu.Lock()
-	f, ok := c.files[key]
-	delete(c.files, key)
+	key := fileName(name)
+	f, ok := c.getFile(name)
+	if ok {
+		delete(c.files, key)
+	}
 	c.mu.Unlock()
 
 	if ok {
@@ -185,8 +210,13 @@ type cachedFile struct {
 	cnt    int64
 }
 
+func (c *cache) getPath(name string) string {
+	// TODO root path
+	return filepath.Join(c.dir, name)
+}
+
 func (c *cache) newFile(name string) (*cachedFile, error) {
-	s, err := stream.NewStream(name, c.fs)
+	s, err := stream.NewStream(c.getPath(fileName(name)), c.fs)
 	if err != nil {
 		return nil, err
 	}
@@ -198,7 +228,7 @@ func (c *cache) newFile(name string) (*cachedFile, error) {
 }
 
 func (c *cache) oldFile(name string) *cachedFile {
-	s, _ := stream.NewStream(name, c.fs)
+	s, _ := stream.OldStream(c.getPath(name), c.fs)
 	s.Close()
 	cf := &cachedFile{
 		stream: s,
