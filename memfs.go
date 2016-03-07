@@ -6,8 +6,6 @@ import (
 	"io"
 	"sync"
 	"time"
-
-	"github.com/amozoss/stream"
 )
 
 type memFS struct {
@@ -23,10 +21,6 @@ func NewMemFs() FileSystem {
 	}
 }
 
-func (fs *memFS) Reload(add func(key string)) error {
-	return nil
-}
-
 func (fs *memFS) AccessTimes(name string) (rt, wt time.Time, err error) {
 	fs.mu.RLock()
 	defer fs.mu.RUnlock()
@@ -37,7 +31,7 @@ func (fs *memFS) AccessTimes(name string) (rt, wt time.Time, err error) {
 	return rt, wt, errors.New("file has not been read")
 }
 
-func (fs *memFS) Create(key string) (stream.File, error) {
+func (fs *memFS) Create(key string) (File, error) {
 	fs.mu.Lock()
 	defer fs.mu.Unlock()
 	if _, ok := fs.files[key]; ok {
@@ -53,7 +47,7 @@ func (fs *memFS) Create(key string) (stream.File, error) {
 	return file, nil
 }
 
-func (fs *memFS) Open(name string) (stream.File, error) {
+func (fs *memFS) Open(name string) (File, error) {
 	fs.mu.Lock()
 	defer fs.mu.Unlock()
 	if f, ok := fs.files[name]; ok {

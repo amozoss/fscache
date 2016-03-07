@@ -1,72 +1,112 @@
+// Package stream provides a way to read and write to a synchronous buffered pipe, with multiple reader support.
 package fscache
 
 import (
-	"encoding/json"
 	"errors"
-	"io"
+	"sync"
+	"sync/atomic"
 )
 
-type decoder interface {
-	Decode(interface{}) error
+// ErrRemoving is returned when requesting a Reader on a Stream which is being Removed.
+var ErrRemoving = errors.New("cannot open a new reader while removing file")
+
+// Stream is used to concurrently Write and Read from a File.
+type Stream struct {
+	grp      sync.WaitGroup
+	b        *broadcaster
+	file     File
+	fs       FileSystem
+	removing chan struct{}
+	cnt      int64 // keeps track of open streams, used for IsOpen
 }
 
-type encoder interface {
-	Encode(interface{}) error
+// Creates a new Stream with Name "name" in FileSystem fs.
+func CreateStream(name string, fs FileSystem) (*Stream, error) {
+	f, err := fs.Create(name)
+	sf := &Stream{
+		file:     f,
+		fs:       fs,
+		b:        newBroadcaster(),
+		removing: make(chan struct{}),
+	}
+	sf.inc()
+	return sf, err
 }
 
-type pktReader struct {
-	dec decoder
+// Opens a Stream with Name "name" in FileSystem fs.
+func OpenStream(name string, fs FileSystem) (*Stream, error) {
+	f, err := fs.Open(name)
+	sf := &Stream{
+		file:     f,
+		fs:       fs,
+		b:        newBroadcaster(),
+		removing: make(chan struct{}),
+	}
+	sf.inc()
+	return sf, err
 }
 
-type pktWriter struct {
-	enc encoder
+// Name returns the name of the underlying File in the FileSystem.
+func (s *Stream) Name() string { return s.file.Name() }
+
+// Write writes p to the Stream. It's concurrent safe to be called with Stream's other methods.
+func (s *Stream) Write(p []byte) (int, error) {
+	defer s.b.Broadcast()
+	s.b.Lock()
+	defer s.b.Unlock()
+	return s.file.Write(p)
 }
 
-type packet struct {
-	Err  int
-	Data []byte
+func (s *Stream) IsOpen() bool {
+	return atomic.LoadInt64(&s.cnt) > 0
 }
 
-const eof = 1
-
-func (t *pktReader) ReadAt(p []byte, off int64) (n int, err error) {
-	// TODO not implemented
-	return 0, errors.New("not implemented")
+// Close will close the active stream. This will cause Readers to return EOF once they have
+// read the entire stream.
+func (s *Stream) Close() error {
+	defer s.dec()
+	defer s.b.Close()
+	s.b.Lock()
+	defer s.b.Unlock()
+	return s.file.Close()
 }
 
-func (t *pktReader) Read(p []byte) (int, error) {
-	var pkt packet
-	err := t.dec.Decode(&pkt)
+// Remove will block until the Stream and all its Readers have been Closed,
+// at which point it will delete the underlying file. NextReader() will return
+// ErrRemoving if called after Remove.
+func (s *Stream) Remove() error {
+	close(s.removing)
+	s.grp.Wait()
+	return s.fs.Remove(s.Name())
+}
+
+// NextReader will return a concurrent-safe Reader for this stream. Each Reader will
+// see a complete and independent view of the stream, and can Read will the stream
+// is written to.
+func (s *Stream) NextReader() (*Reader, error) {
+	s.inc()
+
+	select {
+	case <-s.removing:
+		s.dec()
+		return nil, ErrRemoving
+	default:
+	}
+
+	file, err := s.fs.Open(s.Name())
 	if err != nil {
-		return 0, err
+		s.dec()
+		return nil, err
 	}
-	if pkt.Err == eof {
-		return 0, io.EOF
-	}
-	return copy(p, pkt.Data), nil
+
+	return &Reader{file: file, s: s}, nil
 }
 
-func (t *pktReader) Close() error {
-	return nil
+func (s *Stream) inc() {
+	atomic.AddInt64(&s.cnt, 1)
+	s.grp.Add(1)
 }
-
-func (t *pktWriter) Write(p []byte) (int, error) {
-	pkt := packet{Data: p}
-	err := t.enc.Encode(pkt)
-	if err != nil {
-		return 0, err
-	}
-	return len(p), nil
-}
-
-func (t *pktWriter) Close() error {
-	return t.enc.Encode(packet{Err: eof})
-}
-
-func newEncoder(w io.Writer) io.WriteCloser {
-	return &pktWriter{enc: json.NewEncoder(w)}
-}
-
-func newDecoder(r io.Reader) ReaderAtCloser {
-	return &pktReader{dec: json.NewDecoder(r)}
+func (s *Stream) dec() {
+	atomic.AddInt64(&s.cnt, -1)
+	s.grp.Done()
 }

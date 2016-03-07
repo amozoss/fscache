@@ -4,13 +4,11 @@ import (
 	"crypto/md5"
 	"fmt"
 	"io"
+	"io/ioutil"
 	"os"
 	"path/filepath"
 	"sync"
-	"sync/atomic"
 	"time"
-
-	"github.com/amozoss/stream"
 )
 
 // Cache works like a concurrent-safe map for streams.
@@ -38,11 +36,11 @@ type Cache interface {
 }
 
 type cache struct {
-	mu    sync.RWMutex
-	files map[string]*cachedFile
-	grim  Reaper
-	fs    FileSystem
-	dir   string
+	mu      sync.RWMutex
+	streams map[string]*Stream
+	grim    Reaper
+	fs      FileSystem
+	root    string
 }
 
 type ReaderAtCloser interface {
@@ -73,10 +71,10 @@ func New(dir string, perms os.FileMode, expiry time.Duration) (Cache, error) {
 // Reaper is used to determine when files expire, nil means never expire.
 func NewCache(fs FileSystem, dir string, grim Reaper) (Cache, error) {
 	c := &cache{
-		files: make(map[string]*cachedFile),
-		grim:  grim,
-		fs:    fs,
-		dir:   dir,
+		streams: make(map[string]*Stream),
+		grim:    grim,
+		fs:      fs,
+		root:    dir,
 	}
 	err := c.load()
 	if err != nil {
@@ -97,19 +95,19 @@ func (c *cache) haunt() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	for key, f := range c.files {
-		if atomic.LoadInt64(&f.cnt) > 0 {
+	for key, s := range c.streams {
+		if s.IsOpen() {
 			continue
 		}
 
-		lastRead, lastWrite, err := c.fs.AccessTimes(f.stream.Name())
+		lastRead, lastWrite, err := c.fs.AccessTimes(s.Name())
 		if err != nil {
 			continue
 		}
 
 		if c.grim.Reap(key, lastRead, lastWrite) {
-			delete(c.files, key)
-			c.fs.Remove(f.stream.Name())
+			delete(c.streams, key)
+			s.Remove()
 		}
 	}
 	return
@@ -118,16 +116,39 @@ func (c *cache) haunt() {
 func (c *cache) load() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.fs.Reload(func(key string) {
-		// keys will be names of the files
-		c.files[key] = c.oldFile(key)
-	})
+	files, err := ioutil.ReadDir(c.root)
+	if err != nil {
+		return err
+	}
+
+	for _, f := range files {
+		// TODO Check expire time and remove old files
+		key := f.Name()
+		c.streams[key] = c.openStream(key)
+	}
+	return nil
+}
+
+func (c *cache) createStream(name string) (*Stream, error) {
+	s, err := CreateStream(c.getPath(fileName(name)), c.fs)
+	if err != nil {
+		return nil, err
+	}
+	return s, nil
+}
+
+// When server starts up again, cached files are read in and reused
+func (c *cache) openStream(name string) *Stream {
+	s, _ := OpenStream(c.getPath(name), c.fs)
+	// Closing because it isn't being written to, might be a better way
+	s.Close()
+	return s
 }
 
 func (c *cache) Exists(name string) bool {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	_, ok := c.getFile(name)
+	_, ok := c.getStream(name)
 	return ok
 }
 
@@ -136,22 +157,22 @@ func fileName(name string) string {
 	return fmt.Sprintf("%x", md5sum[:])
 }
 
-func (c *cache) putFile(name string, file *cachedFile) {
+func (c *cache) putStream(name string, s *Stream) {
 	key := fileName(name)
-	c.files[key] = file
+	c.streams[key] = s
 }
 
-func (c *cache) getFile(name string) (*cachedFile, bool) {
+func (c *cache) getStream(name string) (*Stream, bool) {
 	key := fileName(name)
-	f, ok := c.files[key]
+	f, ok := c.streams[key]
 	return f, ok
 }
 
 func (c *cache) Get(name string) (r ReaderAtCloser, w io.WriteCloser, err error) {
 	c.mu.RLock()
-	f, ok := c.getFile(name)
+	s, ok := c.getStream(name)
 	if ok {
-		r, err = f.next()
+		r, err = s.NextReader()
 		c.mu.RUnlock()
 		return r, nil, err
 	}
@@ -160,40 +181,40 @@ func (c *cache) Get(name string) (r ReaderAtCloser, w io.WriteCloser, err error)
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	f, ok = c.getFile(name)
+	s, ok = c.getStream(name)
 	if ok {
-		r, err = f.next()
+		r, err = s.NextReader()
 		return r, nil, err
 	}
 
-	f, err = c.newFile(name)
+	s, err = c.createStream(name)
 	if err != nil {
 		return nil, nil, err
 	}
 
-	r, err = f.next()
+	r, err = s.NextReader()
 	if err != nil {
-		f.Close()
-		c.fs.Remove(f.stream.Name())
+		s.Close()
+		s.Remove()
 		return nil, nil, err
 	}
 
-	c.putFile(name, f)
+	c.putStream(name, s)
 
-	return r, f, err
+	return r, s, err
 }
 
 func (c *cache) Remove(name string) error {
 	c.mu.Lock()
 	key := fileName(name)
-	f, ok := c.getFile(name)
+	s, ok := c.getStream(name)
 	if ok {
-		delete(c.files, key)
+		delete(c.streams, key)
 	}
 	c.mu.Unlock()
 
 	if ok {
-		return f.stream.Remove()
+		return s.Remove()
 	}
 	return nil
 }
@@ -201,76 +222,10 @@ func (c *cache) Remove(name string) error {
 func (c *cache) Clean() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.files = make(map[string]*cachedFile)
-	return c.fs.RemoveAll()
-}
-
-type cachedFile struct {
-	stream *stream.Stream
-	cnt    int64
+	c.streams = make(map[string]*Stream)
+	return os.RemoveAll(c.root)
 }
 
 func (c *cache) getPath(name string) string {
-	// TODO root path
-	return filepath.Join(c.dir, name)
-}
-
-func (c *cache) newFile(name string) (*cachedFile, error) {
-	s, err := stream.NewStream(c.getPath(fileName(name)), c.fs)
-	if err != nil {
-		return nil, err
-	}
-	cf := &cachedFile{
-		stream: s,
-	}
-	atomic.AddInt64(&cf.cnt, 1)
-	return cf, nil
-}
-
-func (c *cache) oldFile(name string) *cachedFile {
-	s, _ := stream.OldStream(c.getPath(name), c.fs)
-	s.Close()
-	cf := &cachedFile{
-		stream: s,
-	}
-	return cf
-}
-
-func (f *cachedFile) next() (r ReaderAtCloser, err error) {
-	reader, err := f.stream.NextReader()
-	if err != nil {
-		return nil, err
-	}
-	atomic.AddInt64(&f.cnt, 1)
-	return &cacheReader{
-		r: reader,
-		cnt: &f.cnt,
-	}, nil
-}
-
-func (f *cachedFile) Write(p []byte) (int, error) {
-	return f.stream.Write(p)
-}
-
-func (f *cachedFile) Close() error {
-	defer func() { atomic.AddInt64(&f.cnt, -1) }()
-	return f.stream.Close()
-}
-
-type cacheReader struct {
-	r   ReaderAtCloser
-	cnt *int64
-}
-
-func (r *cacheReader) ReadAt(p []byte, off int64) (n int, err error) {
-	return r.r.ReadAt(p, off)
-}
-
-func (r *cacheReader) Read(p []byte) (n int, err error) {
-	return r.r.Read(p)
-}
-
-func (r *cacheReader) Close() error {
-	defer func() { atomic.AddInt64(r.cnt, -1) }()
-	return r.r.Close()
+	return filepath.Join(c.root, name)
 }

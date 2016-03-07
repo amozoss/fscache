@@ -1,71 +1,50 @@
 package fscache
 
 import (
-	"io/ioutil"
+	"io"
 	"os"
 	"time"
 
 	"gopkg.in/djherbis/atime.v1"
-	"github.com/amozoss/stream"
 )
 
 // FileSystem is used as the source for a Cache.
 type FileSystem interface {
-	// Stream FileSystem
-	stream.FileSystem
-
-	// Reload should look through the FileSystem and call the suplied fn
-	// with the key/filename pairs that are found.
-	Reload(func(key string)) error
-
-	// RemoveAll should empty the FileSystem of all files.
-	RemoveAll() error
-
-	// AccessTimes takes a File.Name() and returns the last time the file was read,
-	// and the last time it was written to.
+	Create(name string) (File, error)
+	Open(name string) (File, error)
+	Remove(name string) error
 	// It will be used to check expiry of a file, and must be concurrent safe
 	// with modifications to the FileSystem (writes, reads etc.)
 	AccessTimes(name string) (rt, wt time.Time, err error)
 }
 
-type stdFs struct {
-	root string
+// File is a backing data-source for a Stream.
+type File interface {
+	Name() string // The name used to Create/Open the File
+	io.Reader     // Reader must continue reading after EOF on subsequent calls after more Writes.
+	io.ReaderAt   // Similarly to Reader
+	io.Writer     // Concurrent reading/writing must be supported.
+	io.Closer     // Close should do any cleanup when done with the File.
 }
+
+type stdFs struct{}
 
 // NewFs returns a FileSystem rooted at directory dir.
 // Dir is created with perms if it doesn't exist.
 func NewFs(dir string, mode os.FileMode) (FileSystem, error) {
-	return &stdFs{root: dir}, os.MkdirAll(dir, mode)
+	return &stdFs{}, os.MkdirAll(dir, mode)
 }
 
-func (fs *stdFs) Reload(add func(key string)) error {
-	files, err := ioutil.ReadDir(fs.root)
-	if err != nil {
-		return err
-	}
-
-	for _, f := range files {
-		// TODO Check expire time and remove old files
-		add(f.Name())
-		return nil
-	}
-	return nil
-}
-
-func (fs *stdFs) Create(name string) (stream.File, error) {
+func (fs *stdFs) Create(name string) (File, error) {
 	return os.Create(name)
 }
 
-func (fs *stdFs) Open(name string) (stream.File, error) {
+func (fs *stdFs) Open(name string) (File, error) {
 	return os.Open(name)
 }
 
 func (fs *stdFs) Remove(name string) error {
 	return os.Remove(name)
-}
-
-func (fs *stdFs) RemoveAll() error {
-	return os.RemoveAll(fs.root)
 }
 
 func (fs *stdFs) AccessTimes(name string) (rt, wt time.Time, err error) {
