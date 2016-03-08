@@ -1,4 +1,4 @@
-fscache 
+fscache
 ==========
 
 [![GoDoc](https://godoc.org/github.com/djherbis/fscache?status.svg)](https://godoc.org/github.com/djherbis/fscache)
@@ -25,7 +25,7 @@ import (
 	"os"
 	"time"
 
-	"github.com/djherbis/fscache"
+	"github.com/amozoss/fscache"
 )
 
 func main() {
@@ -60,34 +60,9 @@ func main() {
 }
 ```
 
-A Caching Middle-ware:
-
-```go
-package main
-
-import(
-	"net/http"
-	"time"
-
-	"github.com/djherbis/fscache"
-)
-
-func main(){
-	c, err := fscache.New("./cache", 0700, 0)
-	if err != nil {
-		log.Fatal(err.Error())
-	}
-
-	handler := func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprintf(w, "%v: %s", time.Now(), "hello world")
-	}
-
-	http.ListenAndServe(":8080", fscache.Handler(c, http.HandlerFunc(handler)))
-}
-```
 
 Installation
 ------------
 ```sh
-go get github.com/djherbis/fscache
+go get github.com/amozoss/fscache
 ```
