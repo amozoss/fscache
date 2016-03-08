@@ -23,6 +23,9 @@ type Stream struct {
 // Creates a new Stream with Name "name" in FileSystem fs.
 func CreateStream(name string, fs FileSystem) (*Stream, error) {
 	f, err := fs.Create(name)
+	if err != nil {
+		return nil, err
+	}
 	sf := &Stream{
 		file:     f,
 		fs:       fs,
@@ -36,6 +39,9 @@ func CreateStream(name string, fs FileSystem) (*Stream, error) {
 // Opens a Stream with Name "name" in FileSystem fs.
 func OpenStream(name string, fs FileSystem) (*Stream, error) {
 	f, err := fs.Open(name)
+	if err != nil {
+		return nil, err
+	}
 	sf := &Stream{
 		file:     f,
 		fs:       fs,
@@ -84,14 +90,13 @@ func (s *Stream) Remove() error {
 // see a complete and independent view of the stream, and can Read will the stream
 // is written to.
 func (s *Stream) NextReader() (*Reader, error) {
-	s.inc()
 
 	select {
 	case <-s.removing:
-		s.dec()
 		return nil, ErrRemoving
 	default:
 	}
+	s.inc()
 
 	file, err := s.fs.Open(s.Name())
 	if err != nil {

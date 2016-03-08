@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"sync"
 	"time"
+
+	"github.com/spacemonkeygo/spacelog"
 )
 
 // Cache works like a concurrent-safe map for streams.
@@ -34,6 +36,8 @@ type Cache interface {
 	// Clean is not safe to call while streams are being read/written.
 	Clean() error
 }
+
+var logger = spacelog.GetLogger()
 
 type cache struct {
 	mu      sync.RWMutex
@@ -124,7 +128,14 @@ func (c *cache) load() error {
 	for _, f := range files {
 		// TODO Check expire time and remove old files
 		key := f.Name()
-		c.streams[key] = c.openStream(key)
+		s, err := c.openStream(key)
+		if err != nil {
+			logger.Errorf("error opening stream %s : %v", key, err)
+			err = c.Remove(key)
+			logger.Errorf("error removing stream %s : %v", key, err)
+			continue
+		}
+		c.streams[key] = s
 	}
 	return nil
 }
@@ -138,11 +149,17 @@ func (c *cache) createStream(name string) (*Stream, error) {
 }
 
 // When server starts up again, cached files are read in and reused
-func (c *cache) openStream(name string) *Stream {
-	s, _ := OpenStream(c.getPath(name), c.fs)
+func (c *cache) openStream(name string) (*Stream, error) {
+	s, err := OpenStream(c.getPath(name), c.fs)
+	if err != nil {
+		return nil, err
+	}
 	// Closing because it isn't being written to, might be a better way
-	s.Close()
-	return s
+	err = s.Close()
+	if err != nil {
+		return nil, err
+	}
+	return s, nil
 }
 
 func (c *cache) Exists(name string) bool {
@@ -180,12 +197,6 @@ func (c *cache) Get(name string) (r ReaderAtCloser, w io.WriteCloser, err error)
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
-
-	s, ok = c.getStream(name)
-	if ok {
-		r, err = s.NextReader()
-		return r, nil, err
-	}
 
 	s, err = c.createStream(name)
 	if err != nil {
