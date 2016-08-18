@@ -67,6 +67,10 @@ func (s *Stream) IsOpen() bool {
 	return atomic.LoadInt64(&s.cnt) > 0
 }
 
+func (s *Stream) Size() (int64, error) {
+	return s.fs.Size(s.Name())
+}
+
 // Close will close the active stream. This will cause Readers to return EOF once they have
 // read the entire stream.
 func (s *Stream) Close() error {

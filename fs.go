@@ -16,6 +16,7 @@ type FileSystem interface {
 	// It will be used to check expiry of a file, and must be concurrent safe
 	// with modifications to the FileSystem (writes, reads etc.)
 	AccessTimes(name string) (rt, wt time.Time, err error)
+	Size(name string) (int64, error)
 }
 
 // File is a backing data-source for a Stream.
@@ -53,4 +54,12 @@ func (fs *stdFs) AccessTimes(name string) (rt, wt time.Time, err error) {
 		return rt, wt, err
 	}
 	return atime.Get(fi), fi.ModTime(), nil
+}
+
+func (fs *stdFs) Size(name string) (size int64, err error) {
+	fi, err := os.Stat(name)
+	if err != nil {
+		return 0, err
+	}
+	return fi.Size(), nil
 }

@@ -71,6 +71,10 @@ func (fs *memFS) RemoveAll() error {
 	return nil
 }
 
+func (fs *memFS) Size(name string) (int64, error) {
+	return 0, errors.New("not implemented")
+}
+
 type memFile struct {
 	mu   sync.RWMutex
 	name string
