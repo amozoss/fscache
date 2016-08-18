@@ -268,9 +268,9 @@ func TestSize(t *testing.T) {
 	testCaches(t, func(c Cache) {
 		defer c.Clean()
 
-		l := c.Size("dankmemes")
-		if l != 0 {
-			t.Error("nonexistant entry had nonzero length")
+		l, err := c.Size("dankmemes")
+		if err == nil {
+			t.Error("expected error")
 			return
 		}
 
@@ -284,7 +284,10 @@ func TestSize(t *testing.T) {
 		w.Write([]byte("leroy jenkins"))
 		w.Close()
 
-		l = c.Size("dankmemes")
+		l, err = c.Size("dankmemes")
+		if err != nil {
+			t.Error("unexpected error")
+		}
 		if l != int64(len([]byte("leroy jenkins"))) {
 			t.Errorf("unexpected entry length: %d", l)
 			return

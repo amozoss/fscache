@@ -2,6 +2,7 @@ package fscache
 
 import (
 	"crypto/md5"
+	"errors"
 	"fmt"
 	"io"
 	"io/ioutil"
@@ -34,7 +35,7 @@ type Cache interface {
 
 	// Size returns the size of the stream on disk.
 	// It is safe to use concurrently with Get.
-	Size(name string) int64
+	Size(name string) (int64, error)
 
 	// Clean will empty the cache and delete the cache folder.
 	// Clean is not safe to call while streams are being read/written.
@@ -173,18 +174,18 @@ func (c *cache) Exists(name string) bool {
 	return ok
 }
 
-func (c *cache) Size(name string) int64 {
+func (c *cache) Size(name string) (int64, error) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	s, ok := c.getStream(name)
 	if !ok {
-		return 0
+		return 0, errors.New("file not found")
 	}
 	size, err := s.Size()
 	if err != nil {
-		return 0
+		return 0, err
 	}
-	return size
+	return size, nil
 }
 
 func fileName(name string) string {
