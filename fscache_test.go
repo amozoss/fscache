@@ -263,3 +263,31 @@ func TestConcurrent(t *testing.T) {
 		}
 	})
 }
+
+func TestSize(t *testing.T) {
+	testCaches(t, func(c Cache) {
+		defer c.Clean()
+
+		l := c.Size("dankmemes")
+		if l != 0 {
+			t.Error("nonexistant entry had nonzero length")
+			return
+		}
+
+		r, w, err := c.Get("dankmemes")
+		if err != nil {
+			t.Error(err.Error())
+			return
+		}
+		defer r.Close()
+
+		w.Write([]byte("leroy jenkins"))
+		w.Close()
+
+		l = c.Size("dankmemes")
+		if l != int64(len([]byte("leroy jenkins"))) {
+			t.Errorf("unexpected entry length: %d", l)
+			return
+		}
+	})
+}

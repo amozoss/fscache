@@ -38,6 +38,7 @@ func (fs badFs) Remove(name string) error { return os.Remove(name) }
 func (fs badFs) AccessTimes(name string) (rt, wt time.Time, err error) {
 	return rt, wt, nil
 }
+func (r badFs) Size(name string) (int64, error) { return 0, errFail }
 
 func TestBadFile(t *testing.T) {
 	fs := badFs{readers: make([]File, 0, 1)}

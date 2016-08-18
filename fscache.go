@@ -32,6 +32,10 @@ type Cache interface {
 	// It is safe to call Exists concurrently with Get.
 	Exists(name string) bool
 
+	// Size returns the size of the stream on disk.
+	// It is safe to use concurrently with Get.
+	Size(name string) int64
+
 	// Clean will empty the cache and delete the cache folder.
 	// Clean is not safe to call while streams are being read/written.
 	Clean() error
@@ -167,6 +171,20 @@ func (c *cache) Exists(name string) bool {
 	defer c.mu.RUnlock()
 	_, ok := c.getStream(name)
 	return ok
+}
+
+func (c *cache) Size(name string) int64 {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	s, ok := c.getStream(name)
+	if !ok {
+		return 0
+	}
+	size, err := s.Size()
+	if err != nil {
+		return 0
+	}
+	return size
 }
 
 func fileName(name string) string {
