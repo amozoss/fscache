@@ -74,6 +74,9 @@ func (s *Stream) Size() (int64, error) {
 // Close will close the active stream. This will cause Readers to return EOF once they have
 // read the entire stream.
 func (s *Stream) Close() error {
+	if !s.IsOpen() {
+		return errors.New("stream already closed")
+	}
 	defer s.dec()
 	defer s.b.Close()
 	s.b.Lock()

@@ -121,6 +121,24 @@ func TestRemove(t *testing.T) {
 
 }
 
+func TestDoubleClose(t *testing.T) {
+	f, err := CreateStream("test.txt", NewMemFs())
+	if err != nil {
+		t.Error(err)
+		t.FailNow()
+	}
+	err = f.Close()
+	if err != nil {
+		t.Error(err)
+		t.FailNow()
+	}
+	err = f.Close()
+	if err == nil {
+		t.Error("expected second close to error")
+		t.FailNow()
+	}
+}
+
 func testFile(f *Stream, t *testing.T) {
 
 	for i := 0; i < 10; i++ {
