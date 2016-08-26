@@ -2,6 +2,7 @@ package fscache
 
 import (
 	"bytes"
+	"fmt"
 	"io"
 	"io/ioutil"
 	"os"
@@ -123,6 +124,7 @@ func TestReload(t *testing.T) {
 	if !nc.Exists("stream") {
 		t.Errorf("expected stream to be reloaded")
 	} else {
+		fmt.Println("Read all")
 		nc.Remove("stream")
 		if nc.Exists("stream") {
 			t.Errorf("expected stream to be removed")
@@ -138,7 +140,7 @@ func TestReaper(t *testing.T) {
 		t.FailNow()
 	}
 
-	c, err := NewCache(fs, dir, NewReaper(0*time.Second, 100*time.Millisecond))
+	c, err := NewCache(dir, fs, 100*time.Millisecond)
 
 	if err != nil {
 		t.Error(err.Error())
@@ -167,6 +169,7 @@ func TestReaper(t *testing.T) {
 	if c.Exists("stream") {
 		t.Errorf("stream should have been reaped")
 	}
+	fmt.Println("hi")
 
 	files, err := ioutil.ReadDir(dir)
 	if err != nil {
@@ -196,11 +199,8 @@ func TestReaperNoExpire(t *testing.T) {
 			t.Errorf("stream should exist")
 		}
 
-		if lc, ok := c.(*cache); ok {
-			lc.haunt()
-			if !c.Exists("stream") {
-				t.Errorf("stream shouldn't have been reaped")
-			}
+		if !c.Exists("stream") {
+			t.Errorf("stream shouldn't have been reaped")
 		}
 	})
 }

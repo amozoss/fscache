@@ -19,13 +19,23 @@ type FileSystem interface {
 	Size(name string) (int64, error)
 }
 
-// File is a backing data-source for a Stream.
 type File interface {
+	Name() string
+	io.Writer
+	io.ReaderAt
+	io.Reader
+	io.Closer
+}
+
+type WriteFile interface {
+	Name() string  // The name used to Create/Open the File
+	io.WriteCloser // Concurrent writing must be supported.
+}
+
+type ReadFile interface {
 	Name() string // The name used to Create/Open the File
-	io.Reader     // Reader must continue reading after EOF on subsequent calls after more Writes.
 	io.ReaderAt   // Similarly to Reader
-	io.Writer     // Concurrent reading/writing must be supported.
-	io.Closer     // Close should do any cleanup when done with the File.
+	io.ReadCloser
 }
 
 type stdFs struct{}

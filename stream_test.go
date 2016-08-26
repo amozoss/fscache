@@ -43,15 +43,10 @@ func (r badFs) Size(name string) (int64, error) { return 0, errFail }
 func TestBadFile(t *testing.T) {
 	fs := badFs{readers: make([]File, 0, 1)}
 	fs.readers = append(fs.readers, badFile{name: "test"})
-	f, err := CreateStream("test", fs)
-	if err != nil {
-		t.Error(err)
-		t.FailNow()
-	}
-	defer f.Remove()
-	defer f.Close()
+	s := NewStream("test", fs)
+	defer s.Remove()
 
-	r, err := f.NextReader()
+	r, err := s.NextReader()
 	if err != nil {
 		t.Error(err)
 		t.FailNow()
@@ -72,15 +67,10 @@ func TestBadFile(t *testing.T) {
 }
 
 func TestBadFs(t *testing.T) {
-	f, err := CreateStream("test", badFs{})
-	if err != nil {
-		t.Error(err)
-		t.FailNow()
-	}
-	defer f.Remove()
-	defer f.Close()
+	s := NewStream("test", badFs{})
+	defer s.Remove()
 
-	r, err := f.NextReader()
+	r, err := s.NextReader()
 	if err == nil {
 		t.Error("expected open error")
 		t.FailNow()
@@ -91,25 +81,21 @@ func TestBadFs(t *testing.T) {
 }
 
 func TestMem(t *testing.T) {
-	f, err := CreateStream("test.txt", NewMemFs())
+	s := NewStream("test.txt", NewMemFs())
+	writer, err := s.GetWriter()
 	if err != nil {
 		t.Error(err)
 		t.FailNow()
 	}
-	f.Write(nil)
-	testFile(f, t)
+	writer.Write(nil)
+	testFile(s, t)
 }
 
 func TestRemove(t *testing.T) {
-	f, err := CreateStream("test.txt", NewMemFs())
-	if err != nil {
-		t.Error(err)
-		t.FailNow()
-	}
-	defer f.Close()
-	go f.Remove()
+	s := NewStream("test.txt", NewMemFs())
+	go s.Remove()
 	<-time.After(100 * time.Millisecond)
-	r, err := f.NextReader()
+	r, err := s.NextReader()
 	switch err {
 	case ErrRemoving:
 	case nil:
@@ -121,38 +107,24 @@ func TestRemove(t *testing.T) {
 
 }
 
-func TestDoubleClose(t *testing.T) {
-	f, err := CreateStream("test.txt", NewMemFs())
+func testFile(s *Stream, t *testing.T) {
+	for i := 0; i < 10; i++ {
+		go testReader(s, t)
+	}
+	writer, err := s.GetWriter()
 	if err != nil {
 		t.Error(err)
 		t.FailNow()
 	}
-	err = f.Close()
-	if err != nil {
-		t.Error(err)
-		t.FailNow()
-	}
-	err = f.Close()
-	if err == nil {
-		t.Error("expected second close to error")
-		t.FailNow()
-	}
-}
-
-func testFile(f *Stream, t *testing.T) {
 
 	for i := 0; i < 10; i++ {
-		go testReader(f, t)
-	}
-
-	for i := 0; i < 10; i++ {
-		f.Write(testdata)
+		writer.Write(testdata)
 		<-time.After(10 * time.Millisecond)
 	}
 
-	f.Close()
-	testReader(f, t)
-	f.Remove()
+	writer.Close()
+	testReader(s, t)
+	s.Remove()
 }
 
 func testReader(f *Stream, t *testing.T) {

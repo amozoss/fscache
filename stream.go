@@ -3,64 +3,54 @@ package fscache
 
 import (
 	"errors"
+	"fmt"
 	"sync"
 	"sync/atomic"
 )
 
 // ErrRemoving is returned when requesting a Reader on a Stream which is being Removed.
-var ErrRemoving = errors.New("cannot open a new reader while removing file")
+var (
+	ErrRemoving = errors.New("cannot open a new reader while removing file")
+	NoWriter    = errors.New("No writer available, was close or never created")
+)
 
-// Stream is used to concurrently Write and Read from a File.
+// Stream has one writer and can have many readers
 type Stream struct {
+	name     string
+	writer   *Writer
 	grp      sync.WaitGroup
-	b        *broadcaster
-	file     File
 	fs       FileSystem
 	removing chan struct{}
 	cnt      int64 // keeps track of open streams, used for IsOpen
 }
 
 // Creates a new Stream with Name "name" in FileSystem fs.
-func CreateStream(name string, fs FileSystem) (*Stream, error) {
-	f, err := fs.Create(name)
-	if err != nil {
-		return nil, err
-	}
+func NewStream(name string, fs FileSystem) *Stream {
 	sf := &Stream{
-		file:     f,
+		name:     name,
 		fs:       fs,
-		b:        newBroadcaster(),
 		removing: make(chan struct{}),
 	}
-	sf.inc()
-	return sf, err
+	return sf
 }
 
-// Opens a Stream with Name "name" in FileSystem fs.
-func OpenStream(name string, fs FileSystem) (*Stream, error) {
-	f, err := fs.Open(name)
-	if err != nil {
-		return nil, err
+// Assumes file is written
+func (s *Stream) GetWriter() (*Writer, error) {
+	if s.writer == nil {
+		f, err := s.fs.Create(s.Name())
+		fmt.Printf("GetWriter %s\n", s.Name())
+		if err != nil {
+			return nil, err
+		}
+		s.writer = NewWriter(f, s.dec)
+		s.inc()
 	}
-	sf := &Stream{
-		file:     f,
-		fs:       fs,
-		b:        newBroadcaster(),
-		removing: make(chan struct{}),
-	}
-	sf.inc()
-	return sf, err
+	return s.writer, nil
 }
 
 // Name returns the name of the underlying File in the FileSystem.
-func (s *Stream) Name() string { return s.file.Name() }
-
-// Write writes p to the Stream. It's concurrent safe to be called with Stream's other methods.
-func (s *Stream) Write(p []byte) (int, error) {
-	defer s.b.Broadcast()
-	s.b.Lock()
-	defer s.b.Unlock()
-	return s.file.Write(p)
+func (s *Stream) Name() string {
+	return s.name
 }
 
 func (s *Stream) IsOpen() bool {
@@ -71,33 +61,21 @@ func (s *Stream) Size() (int64, error) {
 	return s.fs.Size(s.Name())
 }
 
-// Close will close the active stream. This will cause Readers to return EOF once they have
-// read the entire stream.
-func (s *Stream) Close() error {
-	if !s.IsOpen() {
-		return errors.New("stream already closed")
-	}
-	defer s.dec()
-	defer s.b.Close()
-	s.b.Lock()
-	defer s.b.Unlock()
-	return s.file.Close()
-}
-
 // Remove will block until the Stream and all its Readers have been Closed,
 // at which point it will delete the underlying file. NextReader() will return
 // ErrRemoving if called after Remove.
 func (s *Stream) Remove() error {
+	fmt.Println("removing!")
 	close(s.removing)
 	s.grp.Wait()
 	return s.fs.Remove(s.Name())
 }
 
 // NextReader will return a concurrent-safe Reader for this stream. Each Reader will
-// see a complete and independent view of the stream, and can Read will the stream
+// see a complete and independent view of the file, and can Read while the stream
 // is written to.
 func (s *Stream) NextReader() (*Reader, error) {
-
+	fmt.Printf("stream: %v\n", s)
 	select {
 	case <-s.removing:
 		return nil, ErrRemoving
@@ -111,13 +89,14 @@ func (s *Stream) NextReader() (*Reader, error) {
 		return nil, err
 	}
 
-	return &Reader{file: file, s: s}, nil
+	return NewReader(file, s.writer, s.dec), nil
 }
 
 func (s *Stream) inc() {
 	atomic.AddInt64(&s.cnt, 1)
 	s.grp.Add(1)
 }
+
 func (s *Stream) dec() {
 	atomic.AddInt64(&s.cnt, -1)
 	s.grp.Done()

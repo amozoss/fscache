@@ -1,6 +1,7 @@
 package fscache
 
 import (
+	"context"
 	"crypto/md5"
 	"errors"
 	"fmt"
@@ -47,7 +48,6 @@ var logger = spacelog.GetLogger()
 type cache struct {
 	mu      sync.RWMutex
 	streams map[string]*Stream
-	grim    Reaper
 	fs      FileSystem
 	root    string
 }
@@ -65,23 +65,14 @@ func New(dir string, perms os.FileMode, expiry time.Duration) (Cache, error) {
 	if err != nil {
 		return nil, err
 	}
-	var grim Reaper
-	if expiry > 0 {
-		grim = &reaper{
-			expiry: expiry,
-			period: expiry,
-		}
-	}
-	return NewCache(fs, dir, grim)
+	return NewCache(dir, fs, expiry)
 }
 
 // NewCache creates a new Cache based on FileSystem fs.
 // fs.Files() are loaded using the name they were created with as a key.
-// Reaper is used to determine when files expire, nil means never expire.
-func NewCache(fs FileSystem, dir string, grim Reaper) (Cache, error) {
+func NewCache(dir string, fs FileSystem, expiry time.Duration) (Cache, error) {
 	c := &cache{
 		streams: make(map[string]*Stream),
-		grim:    grim,
 		fs:      fs,
 		root:    dir,
 	}
@@ -89,42 +80,14 @@ func NewCache(fs FileSystem, dir string, grim Reaper) (Cache, error) {
 	if err != nil {
 		return nil, err
 	}
-	if grim != nil {
-		c.haunter()
+	if expiry > 0 {
+		ctx := context.Background()
+		go c.ReapEvery(ctx, expiry)
 	}
 	return c, nil
 }
 
-func (c *cache) haunter() {
-	c.haunt()
-	time.AfterFunc(c.grim.Next(), c.haunter)
-}
-
-func (c *cache) haunt() {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	for key, s := range c.streams {
-		if s.IsOpen() {
-			continue
-		}
-
-		lastRead, lastWrite, err := c.fs.AccessTimes(s.Name())
-		if err != nil {
-			continue
-		}
-
-		if c.grim.Reap(key, lastRead, lastWrite) {
-			delete(c.streams, key)
-			s.Remove()
-		}
-	}
-	return
-}
-
 func (c *cache) load() error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
 	files, err := ioutil.ReadDir(c.root)
 	if err != nil {
 		return err
@@ -133,38 +96,10 @@ func (c *cache) load() error {
 	for _, f := range files {
 		// TODO Check expire time and remove old files
 		key := f.Name()
-		s, err := c.openStream(key)
-		if err != nil {
-			logger.Errorf("error opening stream %s : %v", key, err)
-			err = c.Remove(key)
-			logger.Errorf("error removing stream %s : %v", key, err)
-			continue
-		}
-		c.streams[key] = s
+		s := NewStream(c.getPath(key), c.fs)
+		c.putKeyStream(key, s)
 	}
 	return nil
-}
-
-func (c *cache) createStream(name string) (*Stream, error) {
-	s, err := CreateStream(c.getPath(fileName(name)), c.fs)
-	if err != nil {
-		return nil, err
-	}
-	return s, nil
-}
-
-// When server starts up again, cached files are read in and reused
-func (c *cache) openStream(name string) (*Stream, error) {
-	s, err := OpenStream(c.getPath(name), c.fs)
-	if err != nil {
-		return nil, err
-	}
-	// Closing because it isn't being written to, might be a better way
-	err = s.Close()
-	if err != nil {
-		return nil, err
-	}
-	return s, nil
 }
 
 func (c *cache) Exists(name string) bool {
@@ -175,8 +110,6 @@ func (c *cache) Exists(name string) bool {
 }
 
 func (c *cache) Size(name string) (int64, error) {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
 	s, ok := c.getStream(name)
 	if !ok {
 		return 0, errors.New("file not found")
@@ -193,60 +126,76 @@ func fileName(name string) string {
 	return fmt.Sprintf("%x", md5sum[:])
 }
 
-func (c *cache) putStream(name string, s *Stream) {
-	key := fileName(name)
+func (c *cache) putKeyStream(key string, s *Stream) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	c.streams[key] = s
 }
 
+func (c *cache) putStream(name string, s *Stream) {
+	key := fileName(name)
+	c.putKeyStream(key, s)
+}
+
+func (c *cache) deleteStream(key string, lock bool) error {
+	if lock {
+		c.mu.Lock()
+	}
+	s, ok := c.streams[key]
+	if ok {
+		delete(c.streams, key)
+	}
+	if lock {
+		c.mu.Unlock()
+	}
+	if ok {
+		return s.Remove()
+	}
+	return nil
+}
+
 func (c *cache) getStream(name string) (*Stream, bool) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
 	key := fileName(name)
 	f, ok := c.streams[key]
 	return f, ok
 }
 
+func (c *cache) createStream(name string) *Stream {
+	key := fileName(name)
+	s := NewStream(c.getPath(key), c.fs)
+	c.putStream(name, s)
+	return s
+}
+
 func (c *cache) Get(name string) (r ReaderAtCloser, w io.WriteCloser, err error) {
-	c.mu.RLock()
 	s, ok := c.getStream(name)
 	if ok {
-		r, err = s.NextReader()
-		c.mu.RUnlock()
+		r, err := s.NextReader()
+
 		return r, nil, err
 	}
-	c.mu.RUnlock()
 
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	s, err = c.createStream(name)
+	s = c.createStream(name)
+	writer, err := s.GetWriter()
 	if err != nil {
 		return nil, nil, err
 	}
 
 	r, err = s.NextReader()
 	if err != nil {
-		s.Close()
+		writer.Close()
 		s.Remove()
 		return nil, nil, err
 	}
 
-	c.putStream(name, s)
-
-	return r, s, err
+	return r, writer, err
 }
 
 func (c *cache) Remove(name string) error {
-	c.mu.Lock()
 	key := fileName(name)
-	s, ok := c.getStream(name)
-	if ok {
-		delete(c.streams, key)
-	}
-	c.mu.Unlock()
-
-	if ok {
-		return s.Remove()
-	}
-	return nil
+	return c.deleteStream(key, true)
 }
 
 func (c *cache) Clean() error {
@@ -258,4 +207,44 @@ func (c *cache) Clean() error {
 
 func (c *cache) getPath(name string) string {
 	return filepath.Join(c.root, name)
+}
+
+func (c *cache) ReapEvery(ctx context.Context, reap_interval time.Duration) {
+	ticker := time.NewTicker(reap_interval)
+	defer ticker.Stop()
+	done := ctx.Done()
+	for {
+		select {
+		case <-ticker.C:
+			c.reap(reap_interval)
+		case <-done:
+			return
+		}
+	}
+}
+
+func (c *cache) reap(reap_interval time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	for key, s := range c.streams {
+		if s.IsOpen() {
+			continue
+		}
+
+		lastRead, _, err := c.fs.AccessTimes(s.Name())
+		if err != nil {
+			logger.Error(err)
+			continue
+		}
+
+		if lastRead.Before(time.Now().Add(-reap_interval)) {
+			err = c.deleteStream(key, false)
+			if err != nil {
+				logger.Error(err)
+				continue
+			}
+		}
+	}
+	return
 }
