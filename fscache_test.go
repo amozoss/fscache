@@ -5,292 +5,230 @@ import (
 	"fmt"
 	"io"
 	"io/ioutil"
-	"os"
-	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 )
 
-func createFile(name string) (*os.File, error) {
-	return os.OpenFile(name, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0600)
-}
-
-func testDir(t *testing.T) string {
-	dir, err := ioutil.TempDir("", "test-")
-	if err != nil {
-		t.Error(err.Error())
-		t.Fail()
-	}
-	return dir
-}
-
-func testCaches(t *testing.T, run func(c Cache)) {
-	dir := testDir(t)
-	c, err := New(dir, 0700, 1*time.Hour)
-	if err != nil {
-		t.Error(err.Error())
-		return
-	}
-	run(c)
-}
-
-func TestMemFs(t *testing.T) {
-	fs := NewMemFs()
-	if _, err := fs.Open("test"); err == nil {
-		t.Errorf("stream shouldn't exist")
-	}
-	fs.Remove("test")
-
-	f, err := fs.Create("test")
-	if err != nil {
-		t.Errorf("failed to create test")
-	}
-	f.Write([]byte("hello"))
-	f.Close()
-
-	r, err := fs.Open("test")
-	if err != nil {
-		t.Errorf("couldn't open test")
-	}
-	p, err := ioutil.ReadAll(r)
-	r.Close()
-	if !bytes.Equal(p, []byte("hello")) {
-		t.Errorf("expected hello, got %s", string(p))
-	}
-}
-
-func TestLoadCleanup(t *testing.T) {
-	dir := testDir(t)
+func TestLoad(t *testing.T) {
+	test := Wrap(t, "fscache")
+	defer test.Close()
 	name := "test"
 	key := fileName(name)
-	f, err := createFile(filepath.Join(dir, key))
-	if err != nil {
-		t.Error(err.Error())
-	}
-	f.Close()
-	<-time.After(time.Second)
-	f, err = createFile(filepath.Join(dir, key))
-	if err != nil {
-		t.Error(err.Error())
-	}
+	f := test.CreateFile(key)
 	f.Close()
 
-	c, err := New(dir, 0700, 0)
-	if err != nil {
-		t.Error(err.Error())
-		return
-	}
-	defer c.Clean()
-
-	if !c.Exists(name) {
-		t.Errorf("expected test to exist")
-	}
+	cache, err := New(test.Dir(), 0700, time.Second)
+	test.AssertNoError(err)
+	test.Assert(cache.Exists(name), fmt.Sprintf("expected %s to exist",
+		name))
 }
 
 func TestReload(t *testing.T) {
-	dir := testDir(t)
-	c, err := New(dir, 0700, 0)
-	if err != nil {
-		t.Error(err.Error())
-		return
-	}
-	r, w, err := c.Get("stream")
-	if err != nil {
-		t.Error(err.Error())
-		return
-	}
-	r.Close()
-	text := "hello world"
-	w.Write([]byte(text))
-	w.Close()
+	test := Wrap(t, "fscache")
+	defer test.Close()
+	cache, err := New(test.Dir(), 0700, time.Second)
+	test.AssertNoError(err)
 
-	nc, err := New(dir, 0700, 0)
-	if err != nil {
-		t.Error(err.Error())
-		return
-	}
-	r, w, err = nc.Get("stream")
-	if w != nil {
-		t.Errorf("expected writer to be nil")
-	}
+	r, w, err := cache.Get("stream")
+	test.AssertNoError(err)
+	err = r.Close()
+	test.AssertNoError(err)
+	text := []byte("hello world")
+	_, err = w.Write(text)
+	test.AssertNoError(err)
+	err = w.Close()
+	test.AssertNoError(err)
+
+	cache, err = New(test.Dir(), 0700, time.Second)
+	test.AssertNoError(err)
+	r, w, err = cache.Get("stream")
+	test.Assert(w == nil, "expected writer to be nil")
+
 	p, err := ioutil.ReadAll(r)
-	if !bytes.Equal(p, []byte(text)) {
-		t.Errorf("expected %s, got %s", text, string(p))
-	}
+	test.AssertNoError(err)
+	test.AssertByteEqual(text, p)
 	r.Close()
 
-	defer nc.Clean()
-
-	if !nc.Exists("stream") {
-		t.Errorf("expected stream to be reloaded")
-	} else {
-		fmt.Println("Read all")
-		nc.Remove("stream")
-		if nc.Exists("stream") {
-			t.Errorf("expected stream to be removed")
-		}
-	}
+	test.Assert(cache.Exists("stream"), "expected stream to be reloaded")
+	cache.Remove("stream")
+	test.Assert(!cache.Exists("stream"), "expected stream to be removed")
 }
 
 func TestReaper(t *testing.T) {
-	dir := testDir(t)
-	fs, err := NewFs(dir, 0700)
-	if err != nil {
-		t.Error(err.Error())
-		t.FailNow()
-	}
+	reap_interval := time.Second
+	test := NewMemFsCacheTest(t, reap_interval)
+	defer test.Close()
 
-	c, err := NewCache(dir, fs, 100*time.Millisecond)
+	test.SetNow(2016, time.September, 1, 0, 0, 0, 0)
+	r, w, err := test.cache.Get("stream")
+	to_write := []byte("hello")
+	n := test.AssertWrite(w, to_write)
+	test.AssertRead(r, n)
 
-	if err != nil {
-		t.Error(err.Error())
-		return
-	}
-	defer c.Clean()
+	test.cache.reap(reap_interval)
+	test.Assert(test.cache.Exists("stream"), "stream should exist")
 
-	r, w, err := c.Get("stream")
-	w.Write([]byte("hello"))
-	w.Close()
-	io.Copy(ioutil.Discard, r)
-
-	if !c.Exists("stream") {
-		t.Errorf("stream should exist")
-	}
-
-	<-time.After(200 * time.Millisecond)
-
-	if !c.Exists("stream") {
-		t.Errorf("a file expired while in use, fail!")
-	}
+	test.SetNow(2016, time.September, 1, 0, 0, 2, 0)
+	test.cache.reap(reap_interval)
+	test.Assert(test.cache.Exists("stream"), "a file expired while in use, fail!")
 	r.Close()
 
-	<-time.After(200 * time.Millisecond)
+	test.SetNow(2016, time.September, 1, 0, 0, 4, 0)
+	test.cache.reap(reap_interval)
+	test.Assert(!test.cache.Exists("stream"), "stream should have been reaped")
+	files, err := ioutil.ReadDir(test.Dir())
+	test.AssertNoError(err)
 
-	if c.Exists("stream") {
-		t.Errorf("stream should have been reaped")
-	}
-	fmt.Println("hi")
-
-	files, err := ioutil.ReadDir(dir)
-	if err != nil {
-		t.Error(err.Error())
-		return
-	}
-
-	if len(files) > 0 {
-		t.Errorf("expected empty directory")
-	}
+	test.Assert(len(files) == 0, "expected empty directory")
 }
 
 func TestReaperNoExpire(t *testing.T) {
-	testCaches(t, func(c Cache) {
-		defer c.Clean()
-		r, w, err := c.Get("stream")
-		if err != nil {
-			t.Error(err.Error())
-			t.FailNow()
-		}
-		w.Write([]byte("hello"))
-		w.Close()
-		io.Copy(ioutil.Discard, r)
-		r.Close()
+	reap_interval := 0 * time.Second
+	test := NewMemFsCacheTest(t, reap_interval)
+	defer test.Close()
 
-		if !c.Exists("stream") {
-			t.Errorf("stream should exist")
-		}
+	test.SetNow(2016, time.September, 1, 0, 0, 0, 0)
+	r, w, err := test.cache.Get("stream")
+	test.AssertNoError(err)
+	to_write := []byte("hello")
+	n := test.AssertWrite(w, to_write)
+	test.AssertRead(r, n)
+	test.cache.reap(reap_interval)
 
-		if !c.Exists("stream") {
-			t.Errorf("stream shouldn't have been reaped")
-		}
-	})
+	test.Assert(test.cache.Exists("stream"), "stream should exist")
+
+	test.SetNow(2017, time.September, 1, 0, 0, 0, 0)
+	test.cache.reap(reap_interval)
+	test.Assert(test.cache.Exists("stream"), "stream should exist")
 }
 
 func TestSanity(t *testing.T) {
-	testCaches(t, func(c Cache) {
-		defer c.Clean()
+	test := NewFsCacheTest(t)
+	defer test.Close()
+	r, w, err := test.cache.Get("looooooooooooooooooooooooooooong")
+	test.AssertNoError(err)
+	defer r.Close()
 
-		r, w, err := c.Get("looooooooooooooooooooooooooooong")
-		if err != nil {
-			t.Error(err.Error())
-			return
-		}
-		defer r.Close()
+	to_write := []byte("hello")
+	test.AssertWrite(w, to_write)
 
-		w.Write([]byte("hello world\n"))
-		w.Close()
+	buf := bytes.NewBuffer(nil)
+	_, err = io.Copy(buf, r)
+	test.AssertNoError(err)
 
-		buf := bytes.NewBuffer(nil)
-		_, err = io.Copy(buf, r)
-		if err != nil {
-			t.Error(err.Error())
-			return
-		}
-		if !bytes.Equal(buf.Bytes(), []byte("hello world\n")) {
-			t.Errorf("unexpected output %s", buf.Bytes())
-		}
-	})
+	test.AssertByteEqual(to_write, buf.Bytes())
 }
 
 func TestConcurrent(t *testing.T) {
-	testCaches(t, func(c Cache) {
-		defer c.Clean()
+	test := NewFsCacheTest(t)
+	defer test.Close()
 
-		r, w, err := c.Get("stream")
-		r.Close()
-		if err != nil {
-			t.Error(err.Error())
-			return
-		}
-		go func() {
-			w.Write([]byte("hello"))
-			<-time.After(100 * time.Millisecond)
-			w.Write([]byte("world"))
-			w.Close()
-		}()
+	r, w, err := test.cache.Get("stream")
+	test.AssertNoError(err)
+	err = r.Close()
+	test.AssertNoError(err)
 
-		if c.Exists("stream") {
-			r, _, err := c.Get("stream")
-			if err != nil {
-				t.Error(err.Error())
-				return
-			}
-			buf := bytes.NewBuffer(nil)
-			io.Copy(buf, r)
-			r.Close()
-			if !bytes.Equal(buf.Bytes(), []byte("helloworld")) {
-				t.Errorf("unexpected output %s", buf.Bytes())
-			}
-		}
-	})
+	var test_wg sync.WaitGroup
+	test_wg.Add(1)
+	go func() {
+		w.Write([]byte("hello"))
+		test_wg.Done()
+		w.Write([]byte("world"))
+		w.Close()
+	}()
+
+	test_wg.Wait()
+
+	test.Assert(test.cache.Exists("stream"))
+	r, w, err = test.cache.Get("stream")
+	test.AssertNoError(err)
+	test.Assert(w == nil, "writer should be nil")
+
+	buf := bytes.NewBuffer(nil)
+	_, err = io.Copy(buf, r)
+	test.AssertNoError(err)
+	err = r.Close()
+	test.AssertNoError(err)
+	test.AssertByteEqual([]byte("helloworld"), buf.Bytes())
 }
 
 func TestSize(t *testing.T) {
-	testCaches(t, func(c Cache) {
-		defer c.Clean()
+	test := NewFsCacheTest(t)
+	defer test.Close()
 
-		l, err := c.Size("dankmemes")
-		if err == nil {
-			t.Error("expected error")
-			return
-		}
+	_, err := test.cache.Size("dankmemes")
+	test.AssertError(err)
 
-		r, w, err := c.Get("dankmemes")
-		if err != nil {
-			t.Error(err.Error())
-			return
-		}
-		defer r.Close()
+	r, w, err := test.cache.Get("dankmemes")
+	test.AssertNoError(err)
+	defer r.Close()
 
-		w.Write([]byte("leroy jenkins"))
-		w.Close()
+	to_write := []byte("leroy jenkins")
+	test.AssertWrite(w, to_write)
 
-		l, err = c.Size("dankmemes")
-		if err != nil {
-			t.Error("unexpected error")
-		}
-		if l != int64(len([]byte("leroy jenkins"))) {
-			t.Errorf("unexpected entry length: %d", l)
-			return
-		}
-	})
+	l, err := test.cache.Size("dankmemes")
+	test.AssertNoError(err)
+	test.Assert(l == int64(len(to_write)),
+		fmt.Sprintf("expected: %d, got: %d", len(to_write), l))
+}
+
+////////////////////////////////////////////////////////////////////////////
+// Helpers
+////////////////////////////////////////////////////////////////////////////
+
+type FsCacheTest struct {
+	*Test
+	cache             *FsCache
+	original_now_hook func() time.Time
+}
+
+func NewFsCacheTest(t *testing.T) *FsCacheTest {
+	test := Wrap(t, "fstest")
+	c, err := New(test.Dir(), 0700, 1*time.Hour)
+	test.AssertNoError(err)
+	return &FsCacheTest{
+		Test:              test,
+		cache:             c,
+		original_now_hook: nowHook,
+	}
+}
+
+func NewMemFsCacheTest(t *testing.T, expiry time.Duration) *FsCacheTest {
+	test := Wrap(t, "fstest")
+	fs := NewMemFs()
+	c, err := NewCache(test.Dir(), fs, expiry)
+	test.AssertNoError(err)
+	return &FsCacheTest{
+		Test:              test,
+		cache:             c,
+		original_now_hook: nowHook,
+	}
+}
+
+func (t *FsCacheTest) AssertWrite(w io.WriteCloser, p []byte) int {
+	n, err := w.Write(p)
+	t.AssertNoError(err)
+	err = w.Close()
+	t.AssertNoError(err)
+	return n
+}
+
+func (t *FsCacheTest) AssertRead(r ReaderAtCloser, n int) {
+	written, err := io.Copy(ioutil.Discard, r)
+	t.AssertNoError(err)
+	t.Assert(int64(n) == written,
+		fmt.Sprintf("expected: %d, got: %d", n, written))
+}
+
+func (t *FsCacheTest) SetNow(year int, month time.Month, day, hour, min, sec,
+	nsec int) {
+	nowHook = func() time.Time {
+		return time.Date(year, month, day, hour, min, sec, nsec, time.UTC)
+	}
+}
+
+func (t *FsCacheTest) Close() {
+	t.Test.Close()
+	nowHook = t.original_now_hook
 }

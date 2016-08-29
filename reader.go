@@ -1,8 +1,6 @@
 package fscache
 
-import (
-	"io"
-)
+import "io"
 
 type CacheReader interface {
 	Name() string

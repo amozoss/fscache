@@ -3,9 +3,7 @@ package fscache
 
 import (
 	"errors"
-	"fmt"
 	"sync"
-	"sync/atomic"
 )
 
 // ErrRemoving is returned when requesting a Reader on a Stream which is being Removed.
@@ -20,8 +18,9 @@ type Stream struct {
 	writer   *Writer
 	grp      sync.WaitGroup
 	fs       FileSystem
-	removing chan struct{}
-	cnt      int64 // keeps track of open streams, used for IsOpen
+	removing bool
+	mu       sync.Mutex // Used to sync removing and cnt
+	cnt      int64      // keeps track of open streams, used for IsOpen
 }
 
 // Creates a new Stream with Name "name" in FileSystem fs.
@@ -29,7 +28,7 @@ func NewStream(name string, fs FileSystem) *Stream {
 	sf := &Stream{
 		name:     name,
 		fs:       fs,
-		removing: make(chan struct{}),
+		removing: false,
 	}
 	return sf
 }
@@ -38,7 +37,6 @@ func NewStream(name string, fs FileSystem) *Stream {
 func (s *Stream) GetWriter() (*Writer, error) {
 	if s.writer == nil {
 		f, err := s.fs.Create(s.Name())
-		fmt.Printf("GetWriter %s\n", s.Name())
 		if err != nil {
 			return nil, err
 		}
@@ -54,7 +52,9 @@ func (s *Stream) Name() string {
 }
 
 func (s *Stream) IsOpen() bool {
-	return atomic.LoadInt64(&s.cnt) > 0
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.cnt > 0
 }
 
 func (s *Stream) Size() (int64, error) {
@@ -65,21 +65,27 @@ func (s *Stream) Size() (int64, error) {
 // at which point it will delete the underlying file. NextReader() will return
 // ErrRemoving if called after Remove.
 func (s *Stream) Remove() error {
-	fmt.Println("removing!")
-	close(s.removing)
+	s.mu.Lock()
+	s.removing = true
+	s.mu.Unlock()
 	s.grp.Wait()
 	return s.fs.Remove(s.Name())
+}
+
+func (s *Stream) isRemoving() bool {
+	s.mu.Lock()
+	defer func() {
+		s.mu.Unlock()
+	}()
+	return s.removing
 }
 
 // NextReader will return a concurrent-safe Reader for this stream. Each Reader will
 // see a complete and independent view of the file, and can Read while the stream
 // is written to.
 func (s *Stream) NextReader() (*Reader, error) {
-	fmt.Printf("stream: %v\n", s)
-	select {
-	case <-s.removing:
+	if s.isRemoving() {
 		return nil, ErrRemoving
-	default:
 	}
 	s.inc()
 
@@ -93,11 +99,15 @@ func (s *Stream) NextReader() (*Reader, error) {
 }
 
 func (s *Stream) inc() {
-	atomic.AddInt64(&s.cnt, 1)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.cnt += 1
 	s.grp.Add(1)
 }
 
 func (s *Stream) dec() {
-	atomic.AddInt64(&s.cnt, -1)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.cnt -= 1
 	s.grp.Done()
 }

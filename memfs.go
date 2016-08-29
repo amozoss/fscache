@@ -40,7 +40,7 @@ func (fs *memFS) Create(key string) (File, error) {
 	file := &memFile{
 		name: key,
 		r:    bytes.NewBuffer(nil),
-		wt:   time.Now(),
+		wt:   nowHook(),
 	}
 	file.memReader.memFile = file
 	fs.files[key] = file
@@ -51,7 +51,7 @@ func (fs *memFS) Open(name string) (File, error) {
 	fs.mu.Lock()
 	defer fs.mu.Unlock()
 	if f, ok := fs.files[name]; ok {
-		f.rt = time.Now()
+		f.rt = nowHook()
 		return &memReader{memFile: f}, nil
 	}
 	return nil, errors.New("file does not exist")

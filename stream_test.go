@@ -3,10 +3,10 @@ package fscache
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"io"
-	"os"
+	"sync"
 	"testing"
-	"time"
 )
 
 var (
@@ -14,139 +14,96 @@ var (
 	errFail  = errors.New("fail")
 )
 
-type badFs struct {
-	readers []File
-}
-type badFile struct{ name string }
+func TestStream(t *testing.T) {
+	test := NewStreamTest(t)
+	defer test.Close()
 
-func (r badFile) Name() string                            { return r.name }
-func (r badFile) Read(p []byte) (int, error)              { return 0, errFail }
-func (r badFile) ReadAt(p []byte, off int64) (int, error) { return 0, errFail }
-func (r badFile) Write(p []byte) (int, error)             { return 0, errFail }
-func (r badFile) Close() error                            { return errFail }
+	writer, err := test.stream.GetWriter()
+	test.AssertNoError(err)
+	_, err = writer.Write(nil)
+	test.AssertNoError(err)
 
-func (fs badFs) Create(name string) (File, error) { return os.Create(name) }
-func (fs badFs) Open(name string) (File, error) {
-	if len(fs.readers) > 0 {
-		f := fs.readers[len(fs.readers)-1]
-		fs.readers = fs.readers[:len(fs.readers)-1]
-		return f, nil
-	}
-	return nil, errFail
-}
-func (fs badFs) Remove(name string) error { return os.Remove(name) }
-func (fs badFs) AccessTimes(name string) (rt, wt time.Time, err error) {
-	return rt, wt, nil
-}
-func (r badFs) Size(name string) (int64, error) { return 0, errFail }
+	errs := make(chan error, 10)
+	var test_wg sync.WaitGroup
 
-func TestBadFile(t *testing.T) {
-	fs := badFs{readers: make([]File, 0, 1)}
-	fs.readers = append(fs.readers, badFile{name: "test"})
-	s := NewStream("test", fs)
-	defer s.Remove()
-
-	r, err := s.NextReader()
-	if err != nil {
-		t.Error(err)
-		t.FailNow()
-	}
-	defer r.Close()
-	if r.Name() != "test" {
-		t.Errorf("expected name to to be 'test' got %s", r.Name())
-		t.FailNow()
-	}
-	if _, err := r.ReadAt(nil, 0); err == nil {
-		t.Error("expected ReadAt error")
-		t.FailNow()
-	}
-	if _, err := r.Read(nil); err == nil {
-		t.Error("expected Read error")
-		t.FailNow()
-	}
-}
-
-func TestBadFs(t *testing.T) {
-	s := NewStream("test", badFs{})
-	defer s.Remove()
-
-	r, err := s.NextReader()
-	if err == nil {
-		t.Error("expected open error")
-		t.FailNow()
-	} else {
-		return
-	}
-	r.Close()
-}
-
-func TestMem(t *testing.T) {
-	s := NewStream("test.txt", NewMemFs())
-	writer, err := s.GetWriter()
-	if err != nil {
-		t.Error(err)
-		t.FailNow()
-	}
-	writer.Write(nil)
-	testFile(s, t)
-}
-
-func TestRemove(t *testing.T) {
-	s := NewStream("test.txt", NewMemFs())
-	go s.Remove()
-	<-time.After(100 * time.Millisecond)
-	r, err := s.NextReader()
-	switch err {
-	case ErrRemoving:
-	case nil:
-		t.Error("expected error on NextReader()")
-		r.Close()
-	default:
-		t.Error("expected diff error on NextReader()", err)
-	}
-
-}
-
-func testFile(s *Stream, t *testing.T) {
+	test_wg.Add(10)
 	for i := 0; i < 10; i++ {
-		go testReader(s, t)
-	}
-	writer, err := s.GetWriter()
-	if err != nil {
-		t.Error(err)
-		t.FailNow()
+		go func() {
+			r, err := test.stream.NextReader()
+			if err != nil {
+				errs <- err
+			}
+			test.AssertReader(r, errs)
+			test_wg.Done()
+		}()
 	}
 
 	for i := 0; i < 10; i++ {
 		writer.Write(testdata)
-		<-time.After(10 * time.Millisecond)
 	}
 
 	writer.Close()
-	testReader(s, t)
-	s.Remove()
+	go func() {
+		for err := range errs {
+			test.AssertNoError(err)
+		}
+	}()
+	test_wg.Wait()
 }
 
-func testReader(f *Stream, t *testing.T) {
-	r, err := f.NextReader()
-	if err != nil {
-		t.Error(err)
-		t.FailNow()
-	}
+func TestRemove(t *testing.T) {
+	test := NewStreamTest(t)
+	defer test.Close()
+	var test_wg sync.WaitGroup
+	test_wg.Add(1)
+	go func() {
+		test.stream.Remove()
+		test_wg.Done()
+	}()
+	test_wg.Wait()
+	_, err := test.stream.NextReader()
+	test.Assert(err == ErrRemoving, "Expected error")
+}
+
+func (t *StreamTest) AssertReader(r ReaderAtCloser, errs chan error) {
 	defer r.Close()
 
 	buf := bytes.NewBuffer(nil)
+	// should read part of the stream
 	sr := io.NewSectionReader(r, 1+int64(len(testdata)*5), 5)
-	io.Copy(buf, sr)
+	_, err := io.Copy(buf, sr)
+	if err != nil {
+		errs <- err
+		return
+	}
 	if !bytes.Equal(buf.Bytes(), testdata[1:6]) {
-		t.Errorf("unequal %s", buf.Bytes())
+		errs <- errors.New(fmt.Sprintf("expected %s, got %s", string(buf.Bytes()),
+			string(testdata[1:6])))
 		return
 	}
 
 	buf.Reset()
 	io.Copy(buf, r)
-	if !bytes.Equal(buf.Bytes(), bytes.Repeat(testdata, 10)) {
-		t.Errorf("unequal %s", buf.Bytes())
+	p := bytes.Repeat(testdata, 10)
+	q := buf.Bytes()
+	if !bytes.Equal(p, q) {
+		errs <- errors.New(fmt.Sprintf("expected %s, got %s", string(p), string(q)))
 		return
+	}
+	errs <- nil
+}
+
+//////////////////////////////////////////////////////////////////////////
+// Helpers
+//////////////////////////////////////////////////////////////////////////
+type StreamTest struct {
+	*Test
+	stream *Stream
+}
+
+func NewStreamTest(t *testing.T) *StreamTest {
+	return &StreamTest{
+		Test:   Wrap(t, "streamtest"),
+		stream: NewStream("text.txt", NewMemFs()),
 	}
 }

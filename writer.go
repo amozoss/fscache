@@ -2,7 +2,6 @@ package fscache
 
 import (
 	"errors"
-	"fmt"
 	"sync"
 )
 
@@ -30,7 +29,6 @@ func (w *Writer) Write(p []byte) (int, error) {
 	defer w.cond.Broadcast()
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	fmt.Printf("Writing %s\n", string(p))
 	return w.file.Write(p)
 }
 
@@ -61,7 +59,6 @@ func (w *Writer) Close() error {
 
 	w.closed = true
 	w.cond.Broadcast()
-	fmt.Println("Broadcast()")
 	w.mu.Unlock()
 	defer w.on_close()
 	return w.file.Close()
