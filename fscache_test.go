@@ -15,13 +15,26 @@ func TestLoad(t *testing.T) {
 	defer test.Close()
 	name := "test"
 	key := fileName(name)
+
 	f := test.CreateFile(key)
+	to_write := []byte("hello world")
+	err := ioutil.WriteFile(f.Name(), to_write, 0700)
+	test.AssertNoError(err)
 	f.Close()
 
 	cache, err := New(test.Dir(), 0700, time.Second)
 	test.AssertNoError(err)
 	test.Assert(cache.Exists(name), fmt.Sprintf("expected %s to exist",
 		name))
+
+	r, w, err := cache.Get(name, int64(len(to_write)))
+	test.AssertNoError(err)
+	test.Assert(w == nil, "writer should be nil")
+
+	p, err := ioutil.ReadAll(r)
+	test.AssertNoError(err)
+	test.AssertByteEqual(to_write, p)
+	r.Close()
 }
 
 func TestReload(t *testing.T) {
@@ -30,11 +43,11 @@ func TestReload(t *testing.T) {
 	cache, err := New(test.Dir(), 0700, time.Second)
 	test.AssertNoError(err)
 
-	r, w, err := cache.Get("stream")
+	text := []byte("hello world")
+	r, w, err := cache.Get("stream", int64(len(text)))
 	test.AssertNoError(err)
 	err = r.Close()
 	test.AssertNoError(err)
-	text := []byte("hello world")
 	_, err = w.Write(text)
 	test.AssertNoError(err)
 	err = w.Close()
@@ -42,7 +55,8 @@ func TestReload(t *testing.T) {
 
 	cache, err = New(test.Dir(), 0700, time.Second)
 	test.AssertNoError(err)
-	r, w, err = cache.Get("stream")
+	r, w, err = cache.Get("stream", int64(len(text)))
+	test.AssertNoError(err)
 	test.Assert(w == nil, "expected writer to be nil")
 
 	p, err := ioutil.ReadAll(r)
@@ -61,8 +75,8 @@ func TestReaper(t *testing.T) {
 	defer test.Close()
 
 	test.SetNow(2016, time.September, 1, 0, 0, 0, 0)
-	r, w, err := test.cache.Get("stream")
 	to_write := []byte("hello")
+	r, w, err := test.cache.Get("stream", int64(len(to_write)))
 	n := test.AssertWrite(w, to_write)
 	test.AssertRead(r, n)
 
@@ -89,9 +103,9 @@ func TestReaperNoExpire(t *testing.T) {
 	defer test.Close()
 
 	test.SetNow(2016, time.September, 1, 0, 0, 0, 0)
-	r, w, err := test.cache.Get("stream")
-	test.AssertNoError(err)
 	to_write := []byte("hello")
+	r, w, err := test.cache.Get("stream", int64(len(to_write)))
+	test.AssertNoError(err)
 	n := test.AssertWrite(w, to_write)
 	test.AssertRead(r, n)
 	test.cache.reap(reap_interval)
@@ -103,14 +117,39 @@ func TestReaperNoExpire(t *testing.T) {
 	test.Assert(test.cache.Exists("stream"), "stream should exist")
 }
 
+func TestWrongSize(t *testing.T) {
+	test := NewFsCacheTest(t)
+	defer test.Close()
+	to_write := []byte("hello")
+	r, w, err := test.cache.Get("file", int64(len(to_write)))
+	test.AssertNoError(err)
+	r.Close()
+
+	test.AssertWrite(w, to_write)
+
+	to_write = []byte("hello world")
+	r, w, err = test.cache.Get("file", int64(len(to_write)))
+	test.AssertNoError(err)
+	test.Assert(w != nil, "writer should not be nil")
+	defer r.Close()
+	test.AssertWrite(w, to_write)
+
+	buf := bytes.NewBuffer(nil)
+	_, err = io.Copy(buf, r)
+	test.AssertNoError(err)
+
+	test.AssertByteEqual(to_write, buf.Bytes())
+}
+
 func TestSanity(t *testing.T) {
 	test := NewFsCacheTest(t)
 	defer test.Close()
-	r, w, err := test.cache.Get("looooooooooooooooooooooooooooong")
+	to_write := []byte("hello")
+	r, w, err := test.cache.Get("looooooooooooooooooooooooooooong",
+		int64(len(to_write)))
 	test.AssertNoError(err)
 	defer r.Close()
 
-	to_write := []byte("hello")
 	test.AssertWrite(w, to_write)
 
 	buf := bytes.NewBuffer(nil)
@@ -124,7 +163,7 @@ func TestConcurrent(t *testing.T) {
 	test := NewFsCacheTest(t)
 	defer test.Close()
 
-	r, w, err := test.cache.Get("stream")
+	r, w, err := test.cache.Get("stream", 10)
 	test.AssertNoError(err)
 	err = r.Close()
 	test.AssertNoError(err)
@@ -141,7 +180,7 @@ func TestConcurrent(t *testing.T) {
 	test_wg.Wait()
 
 	test.Assert(test.cache.Exists("stream"))
-	r, w, err = test.cache.Get("stream")
+	r, w, err = test.cache.Get("stream", 10)
 	test.AssertNoError(err)
 	test.Assert(w == nil, "writer should be nil")
 
@@ -160,11 +199,11 @@ func TestSize(t *testing.T) {
 	_, err := test.cache.Size("dankmemes")
 	test.AssertError(err)
 
-	r, w, err := test.cache.Get("dankmemes")
+	to_write := []byte("leroy jenkins")
+	r, w, err := test.cache.Get("dankmemes", int64(len(to_write)))
 	test.AssertNoError(err)
 	defer r.Close()
 
-	to_write := []byte("leroy jenkins")
 	test.AssertWrite(w, to_write)
 
 	l, err := test.cache.Size("dankmemes")

@@ -28,7 +28,7 @@ type Cache interface {
 	// If the key does exist, w == nil.
 	// r will always be non-nil as long as err == nil and you must close r when you're done reading.
 	// Get can be called concurrently, and writing and reading is concurrent safe.
-	Get(name string) (ReaderAtCloser, io.WriteCloser, error)
+	Get(name string, size int64) (ReaderAtCloser, io.WriteCloser, error)
 
 	// Remove deletes the stream from the cache, blocking until the underlying
 	// file can be deleted (all active streams finish with it).
@@ -49,7 +49,7 @@ type Cache interface {
 }
 
 type FsCache struct {
-	mu      sync.RWMutex
+	mu      sync.RWMutex // used to sync streams
 	streams map[string]*Stream
 	fs      FileSystem
 	root    string
@@ -174,12 +174,22 @@ func (c *FsCache) createStream(name string) *Stream {
 	return s
 }
 
-func (c *FsCache) Get(name string) (r ReaderAtCloser, w io.WriteCloser, err error) {
+func (c *FsCache) Get(name string, size int64) (r ReaderAtCloser, w io.WriteCloser, err error) {
 	s, ok := c.getStream(name)
 	if ok {
-		r, err := s.NextReader()
+		actual_size, err := s.Size()
+		if err != nil && !os.IsNotExist(err) {
+			return nil, nil, err
+		}
 
-		return r, nil, err
+		if err == nil && (s.IsOpen() || size == actual_size) {
+			r, err := s.NextReader()
+			return r, nil, err
+		}
+
+		if size != actual_size {
+			c.deleteStream(fileName(name), true)
+		}
 	}
 
 	s = c.createStream(name)
