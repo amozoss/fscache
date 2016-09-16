@@ -2,12 +2,17 @@ package fscache
 
 import (
 	"bytes"
-	"errors"
 	"fmt"
 	"io/ioutil"
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/spacemonkeygo/errors"
+)
+
+var (
+	Error = errors.NewClass("test error")
 )
 
 type Test struct {
@@ -28,20 +33,20 @@ func Wrap(t *testing.T, dir string) *Test {
 
 func (t *Test) AssertError(err error) {
 	if err == nil {
-		t.t.Fatal(errors.New(fmt.Sprintf("expected error: %s", err)))
+		t.t.Fatal(Error.New("expected error: %s", err))
 	}
 }
 
 func (t *Test) AssertNoError(err error) {
 	if err != nil {
-		t.t.Fatal(errors.New(fmt.Sprintf("expected no error: %s", err)))
+		t.t.Fatal(Error.New("expected no error: %s", err))
 	}
 }
 
 func (t *Test) Assert(cond bool, msg ...string) {
 	if !cond {
-		t.t.Fatal(errors.New(fmt.Sprintf("expected true: got %t %s", cond,
-			handleMsg(msg))))
+		t.t.Fatal(Error.New("expected true: got %t %s", cond,
+			handleMsg(msg)))
 	}
 }
 
