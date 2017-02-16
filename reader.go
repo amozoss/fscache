@@ -14,6 +14,7 @@ type Reader struct {
 	writer   *Writer // writer can be nil if file was already written
 	on_close func()
 	file     ReadFile
+	read_off int64
 }
 
 func NewReader(file ReadFile, writer *Writer, on_close func()) *Reader {
@@ -35,23 +36,20 @@ func (r *Reader) ReadAt(p []byte, off int64) (n int, err error) {
 		return r.file.ReadAt(p, off)
 	}
 
-	r.writer.RLock()
-	defer r.writer.RUnlock()
-	var m int
+	var m int = 0
 	for {
-		m, err = r.file.ReadAt(p[n:], off+int64(n))
+		m, err = r.file.ReadAt(p[n:], off)
 		n += m
+		off += int64(m)
 
-		if r.writer.IsOpen() {
-			switch {
-			case n != 0 && err == nil:
-				return n, err
-			case err == io.EOF:
-				r.writer.Wait()
-			case err != nil:
-				return n, err
+		switch {
+		case n != 0 && err == nil:
+			return n, err
+		case err == io.EOF:
+			if v, open := r.writer.Wait(off); v == 0 && !open {
+				return n, io.EOF
 			}
-		} else {
+		case err != nil:
 			return n, err
 		}
 	}
@@ -64,23 +62,20 @@ func (r *Reader) Read(p []byte) (n int, err error) {
 		return r.file.Read(p)
 	}
 
-	r.writer.RLock()
-	defer r.writer.RUnlock()
 	var m int
 	for {
 		m, err = r.file.Read(p[n:])
 		n += m
+		r.read_off += int64(m)
 
-		if r.writer.IsOpen() {
-			switch {
-			case n != 0 && err == nil:
-				return n, nil
-			case err == io.EOF:
-				r.writer.Wait()
-			case err != nil:
-				return n, err
+		switch {
+		case n != 0 && err == nil:
+			return n, nil
+		case err == io.EOF:
+			if v, open := r.writer.Wait(r.read_off); v == 0 && !open {
+				return n, io.EOF
 			}
-		} else {
+		case err != nil:
 			return n, err
 		}
 	}

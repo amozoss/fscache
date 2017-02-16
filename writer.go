@@ -8,6 +8,7 @@ import (
 type Writer struct {
 	mu       sync.RWMutex
 	closed   bool
+	size     int64
 	on_close func()
 	cond     *sync.Cond
 	file     WriteFile
@@ -26,27 +27,28 @@ func NewWriter(file WriteFile, on_close func()) *Writer {
 
 // Write writes p to the Stream. It's concurrent safe to be called with Stream's other methods.
 func (w *Writer) Write(p []byte) (int, error) {
-	defer w.cond.Broadcast()
 	w.mu.Lock()
-	defer w.mu.Unlock()
-	return w.file.Write(p)
+	wrote, err := w.file.Write(p)
+	if wrote > 0 {
+		w.size += int64(wrote)
+	}
+	w.mu.Unlock()
+	w.cond.Broadcast()
+	return wrote, err
 }
 
-func (w *Writer) Wait() {
-	w.cond.Wait()
+func (w *Writer) Wait(off int64) (n int64, open bool) {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	for !w.closed && off >= w.size {
+		w.cond.Wait()
+	}
+	return w.size - off, !w.closed
 }
 
 // Must be read with RLock
 func (w *Writer) IsOpen() bool {
 	return !w.closed
-}
-
-func (w *Writer) RLock() {
-	w.mu.RLock()
-}
-
-func (w *Writer) RUnlock() {
-	w.mu.RUnlock()
 }
 
 // Close will close the writer. This will cause Readers to return EOF once
